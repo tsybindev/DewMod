@@ -8,189 +8,156 @@ namespace DewGemSlotCount.patch;
 [HarmonyPatch(typeof(UI_InGame_SkillButton_GemGroup))]
 public static class UI_InGame_SkillButton_GemGroup_Patch
 {
-    
-    private static readonly float DualLineUpY = 100f;
-    private static readonly float DualLineDownY = -100f;
+    private const float DualLineUpY = 100f;
+    private const float DualLineDownY = -100f;
+
+    private static readonly System.Reflection.FieldInfo LastAppliedGemCountField =
+        AccessTools.Field(typeof(UI_InGame_SkillButton_GemGroup), "_lastAppliedGemCount");
+
+    private static bool _hasLoggedLayoutError;
 
     [HarmonyPrefix]
-    [HarmonyPatch(typeof(UI_InGame_SkillButton_GemGroup), "OnStateChanged")]
-    public static bool OnStateChanged_Prefix(UI_InGame_SkillButton_GemGroup __instance, EditSkillManager.ModeType mode)
+    [HarmonyPatch("LogicUpdate")]
+    public static void LogicUpdate_Prefix(UI_InGame_SkillButton_GemGroup __instance)
     {
-        
-        if (!DewGemSlotCount.Instance.Config.OptimizeUI)
-        {
-            return true;
-        }
-        
-        if (__instance == null)
-        {
-            return false;
-        }
-        
-        
+        // v1.4 selects groups[count - 1] here and caches the count. Build the
+        // missing groups BEFORE that selection, even when OptimizeUI is off.
+        // Do not replace vanilla LogicUpdate: it also populates activeGemSlots.
         AddGemCountUI(__instance);
-        
-
-        var transform = __instance.transform;
-        var type = typeof(UI_InGame_SkillButton_GemGroup);
-
-        // 反射私有字段
-        var cg = AccessTools.Field(type, "_cg").GetValue(__instance) as CanvasGroup;
-        var defaultScale = (float)AccessTools.Field(type, "_gemGroupDefaultScale").GetValue(__instance);
-
-        float duration = __instance.gemGroupAnimDuration;
-
-        if (mode == EditSkillManager.ModeType.None)
-        {
-            transform.DOScale(defaultScale * Vector3.one, duration).SetUpdate(true);
-
-            if (__instance.enableFade)
-                cg.DOFade(0f, duration).SetUpdate(true);
-
-            cg.interactable = !__instance.interactableOnlyWhileEditing;
-            cg.blocksRaycasts = !__instance.interactableOnlyWhileEditing;
-
-
-            if (__instance.groups.Length > 4)
-            {
-                for (int i = 4; i < __instance.groups.Length; i++)
-                {
-                    SmoothIncreaseOfSpacing(__instance.groups[i], duration);
-                }
-            }
-        }
-        else
-        {
-            transform.DOScale(__instance.expandedGemGroupScale * Vector3.one, duration).SetUpdate(true);
-
-            if (__instance.enableFade)
-                cg.DOFade(1f, duration).SetUpdate(true);
-
-            cg.interactable = true;
-            cg.blocksRaycasts = true;
-
-
-            if (__instance.groups.Length > 4)
-            {
-                for (int i = 4; i < __instance.groups.Length; i++)
-                {
-                    SmoothReductionOfSpacing(__instance.groups[i], duration);
-                }
-            }
-        }
-
-        return false; // 阻止原始方法执行
     }
-    
 
-    private static void AddGemCountUI(UI_InGame_SkillButton_GemGroup instance)
+    [HarmonyPostfix]
+    [HarmonyPatch("OnStateChanged")]
+    public static void OnStateChanged_Postfix(UI_InGame_SkillButton_GemGroup __instance,
+        EditSkillManager.ModeType mode)
     {
-        var maxGemCount = Constant.MaxGemCount;
-        if (instance.groups.Length >= maxGemCount)
+        // Keep vanilla scaling, fading, interaction and raycast handling.
+        AddGemCountUI(__instance);
+        if (__instance == null || __instance.groups == null ||
+            DewGemSlotCount.Instance == null || !DewGemSlotCount.Instance.Config.OptimizeUI)
         {
             return;
         }
-        Array.Resize(ref instance.groups, maxGemCount);
-        for (int i = 4; i < maxGemCount; i++)
+
+        for (int i = 4; i < __instance.groups.Length; i++)
         {
-            instance.groups[i] = UnityEngine.Object.Instantiate(instance.groups[3], instance.transform);
-            instance.groups[i].name = GetEnglishByNum(i + 1);
-            Transform group = instance.groups[i].transform;
-            int num = i + 1;
-            while (group.childCount < num)
-            {
-                GameObject obj = UnityEngine.Object.Instantiate(
-                    instance.groups[0].transform.GetChild(0).gameObject, group, false);
-                obj.GetComponent<UI_InGame_GemSlot>().slotIndex = group.childCount - 1;
-            }
-
-            SetupDualLineLayout(group, num);
+            var group = __instance.groups[i];
+            if (group == null) continue;
+            int split = (group.transform.childCount + 1) / 2;
+            float inset = mode == EditSkillManager.ModeType.None ? 0f : 20f;
+            SmoothMoveY(group, 0, split, DualLineDownY + inset, __instance.gemGroupAnimDuration);
+            SmoothMoveY(group, split, group.transform.childCount, DualLineUpY - inset,
+                __instance.gemGroupAnimDuration);
         }
-
-        var rectTransform = instance.transform as RectTransform;
-        rectTransform.pivot = new Vector2(0.5f, 0.5f);
-        rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
-        rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
-        rectTransform.offsetMax = Vector2.zero;
-        rectTransform.offsetMin = Vector2.zero;
     }
 
-    private static string GetEnglishByNum(int number)
+    private static void AddGemCountUI(UI_InGame_SkillButton_GemGroup instance)
     {
-        return number switch
+        if (instance == null || instance.groups == null || instance.groups.Length >= Constant.MaxGemCount)
         {
-            1 => "One",
-            2 => "Two",
-            3 => "Three",
-            4 => "Four",
-            5 => "Five",
-            6 => "Six",
-            7 => "Seven",
-            8 => "Eight",
-            9 => "Nine",
-            10 => "Ten",
-            11 => "Eleven",
-            12 => "Twelve",
-            _ => number.ToString(),
-        };
+            return;
+        }
+
+        // Instantiate can invoke OnEnable before SetActive(false) when the
+        // template is active. GemSlot.OnEnable dereferences DewPlayer.local.
+        // Match vanilla LogicUpdate's readiness guard before creating anything.
+        if (DewPlayer.local == null || DewPlayer.local.hero == null)
+        {
+            return;
+        }
+
+        // Validate before resizing, so vanilla never receives a partially filled array.
+        if (instance.groups.Length < 4 || instance.groups[3] == null)
+        {
+            LogLayoutError("The four-slot UI template is missing.");
+            return;
+        }
+
+        var template = instance.groups[3];
+        if (template.transform.childCount != 4)
+        {
+            LogLayoutError("The four-slot UI template has an unexpected hierarchy.");
+            return;
+        }
+        for (int i = 0; i < 4; i++)
+        {
+            if (template.transform.GetChild(i).GetComponent<UI_InGame_GemSlot>() == null)
+            {
+                LogLayoutError("A slot component is missing from the UI template.");
+                return;
+            }
+        }
+
+        int oldLength = instance.groups.Length;
+        var groups = new GameObject[Constant.MaxGemCount];
+        Array.Copy(instance.groups, groups, oldLength);
+        try
+        {
+            for (int i = oldLength; i < groups.Length; i++)
+            {
+                var clone = UnityEngine.Object.Instantiate(template, instance.transform, false);
+                groups[i] = clone;
+                // Vanilla fills activeGemSlots only when activating an inactive group.
+                clone.SetActive(false);
+                clone.name = $"DewGemSlotCount_{i + 1}";
+                var group = clone.transform;
+                while (group.childCount < i + 1)
+                {
+                    UnityEngine.Object.Instantiate(template.transform.GetChild(0).gameObject, group, false);
+                }
+                for (int slot = 0; slot < group.childCount; slot++)
+                {
+                    group.GetChild(slot).GetComponent<UI_InGame_GemSlot>().slotIndex = slot;
+                }
+                SetupDualLineLayout(group, i + 1);
+            }
+        }
+        catch (Exception ex)
+        {
+            for (int i = oldLength; i < groups.Length; i++)
+            {
+                if (groups[i] != null) UnityEngine.Object.Destroy(groups[i]);
+            }
+            LogLayoutError(ex.ToString());
+            return;
+        }
+
+        instance.groups = groups;
+        // Also recover if the count was cached before the groups were extended.
+        LastAppliedGemCountField?.SetValue(instance, int.MinValue);
+    }
+
+    private static void LogLayoutError(string message)
+    {
+        if (_hasLoggedLayoutError) return;
+        _hasLoggedLayoutError = true;
+        Debug.LogWarning("[DewGemSlotCount] Cannot extend gem slot UI: " + message);
     }
 
     private static void SetupDualLineLayout(Transform group, int totalSlots)
     {
-        int num = Mathf.CeilToInt((float)totalSlots / 2f);
-        int slotCount = totalSlots - num;
-        ArrangeLine(group, num, slotCount, DualLineUpY, 50f * (1f - totalSlots * 0.02f));
-        ArrangeLine(group, 0, num, DualLineDownY, 50f * (1f - totalSlots * 0.02f));
+        int split = (totalSlots + 1) / 2;
+        float spacing = 50f * (1f - totalSlots * 0.02f);
+        ArrangeLine(group, 0, split, DualLineDownY, spacing);
+        ArrangeLine(group, split, totalSlots - split, DualLineUpY, spacing);
     }
 
     private static void ArrangeLine(Transform group, int startIndex, int slotCount, float yPos, float spacing)
     {
-        if (slotCount <= 0) return;
-
         float startX = -(slotCount - 1) * spacing / 2f;
         for (int i = 0; i < slotCount; i++)
         {
-            int index = startIndex + i;
-            if (index < group.childCount)
-            {
-                group.GetChild(index).localPosition = new Vector3(startX + i * spacing, yPos, 0f);
-            }
+            group.GetChild(startIndex + i).localPosition = new Vector3(startX + i * spacing, yPos, 0f);
         }
-    }
-
-    private static void SmoothIncreaseOfSpacing(GameObject group, float duration)
-    {
-        int totalSlots = group.transform.childCount;
-        int num = Mathf.CeilToInt((float)totalSlots / 2f);
-        int slotCount = totalSlots - num;
-        SmoothMoveY(group, 0, num, DualLineDownY, duration);
-        SmoothMoveY(group, num, totalSlots, DualLineUpY, duration);
-    }
-
-
-    private static void SmoothReductionOfSpacing(GameObject group, float duration)
-    {
-        int totalSlots = group.transform.childCount;
-        int num = Mathf.CeilToInt((float)totalSlots / 2f);
-        int slotCount = totalSlots - num;
-        SmoothMoveY(group, 0, num, DualLineDownY + 20, duration);
-        SmoothMoveY(group, num, totalSlots, DualLineUpY - 20, duration);
     }
 
     private static void SmoothMoveY(GameObject group, int startIndex, int endIndex, float value, float duration)
     {
         for (int i = startIndex; i < endIndex; i++)
         {
-            var child = group.transform.GetChild(i) as RectTransform;
+            var child = group.transform.GetChild(i);
             child.DOKill(complete: true);
-            child.DOLocalMoveY(value, duration)
-                .SetUpdate(isIndependentUpdate: true);
+            child.DOLocalMoveY(value, duration).SetUpdate(isIndependentUpdate: true);
         }
-    }
-
-
-    private static UI_InGame_SkillButton GetButton(this UI_InGame_SkillButton_GemGroup instance)
-    {
-        return instance.transform.parent.GetComponentInChildren<UI_InGame_SkillButton>();
     }
 }
