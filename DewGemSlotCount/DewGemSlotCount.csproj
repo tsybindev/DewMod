@@ -46,6 +46,8 @@
         <Compile Include="DewGemSlotCount.cs" />
         <Compile Include="GemSyncHelper.cs" />
         <Compile Include="patch\HeroSkill_Patch.cs" />
+        <Compile Include="patch\EditSkillManager_Patch.cs" />
+        <Compile Include="patch\UI_Tooltip_EquippedGemDescriber_Patch.cs" />
         <Compile Include="patch\Shrine_CorruptedChaos_Patch.cs" />
         <Compile Include="patch\SkillTrigger_Patch.cs" />
         <Compile Include="patch\UI_InGame_Scoreboard_PlayerItem_Skill_Patch.cs" />

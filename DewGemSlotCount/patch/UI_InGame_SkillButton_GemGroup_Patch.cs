@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using DG.Tweening;
 using HarmonyLib;
 using UnityEngine;
@@ -11,8 +12,20 @@ public static class UI_InGame_SkillButton_GemGroup_Patch
     private const float DualLineUpY = 100f;
     private const float DualLineDownY = -100f;
 
+    // The dash button is lifted high above the memory rows while editing, so its
+    // own gem rows use a packed layout: cells hug the dash instead of spilling
+    // over the neighbouring rows.
+    private const float CompactLineUpY = 110f;
+    private const float CompactLineDownY = -110f;
+
     private static readonly System.Reflection.FieldInfo LastAppliedGemCountField =
         AccessTools.Field(typeof(UI_InGame_SkillButton_GemGroup), "_lastAppliedGemCount");
+
+    private static readonly System.Reflection.FieldInfo ButtonField =
+        AccessTools.Field(typeof(UI_InGame_SkillButton_GemGroup), "_button");
+
+    private static readonly System.Reflection.FieldInfo SkillTypeField =
+        AccessTools.Field(typeof(UI_InGame_SkillButton), "skillType");
 
     private static bool _hasLoggedLayoutError;
 
@@ -43,10 +56,15 @@ public static class UI_InGame_SkillButton_GemGroup_Patch
         {
             var group = __instance.groups[i];
             if (group == null) continue;
-            int split = (group.transform.childCount + 1) / 2;
+            var slots = CollectSlotChildren(group.transform);
+            if (slots.Count == 0) continue;
+            bool compact = IsMovementGroup(__instance);
+            float upY = compact ? CompactLineUpY : DualLineUpY;
+            float downY = compact ? CompactLineDownY : DualLineDownY;
+            int split = (slots.Count + 1) / 2;
             float inset = mode == EditSkillManager.ModeType.None ? 0f : 20f;
-            SmoothMoveY(group, 0, split, DualLineDownY + inset, __instance.gemGroupAnimDuration);
-            SmoothMoveY(group, split, group.transform.childCount, DualLineUpY - inset,
+            SmoothMoveSlots(slots, 0, split, downY + inset, __instance.gemGroupAnimDuration);
+            SmoothMoveSlots(slots, split, slots.Count, upY - inset,
                 __instance.gemGroupAnimDuration);
         }
     }
@@ -67,25 +85,18 @@ public static class UI_InGame_SkillButton_GemGroup_Patch
         }
 
         // Validate before resizing, so vanilla never receives a partially filled array.
+        // Slot-bearing children are detected by component instead of assuming a fixed
+        // child index: later UI refactors may reorder or wrap group children, and
+        // hard-coding GetChild(0) would then clone the wrong object.
         if (instance.groups.Length < 4 || instance.groups[3] == null)
         {
             LogLayoutError("The four-slot UI template is missing.");
             return;
         }
 
-        var template = instance.groups[3];
-        if (template.transform.childCount != 4)
+        if (!TryGetSlotPrefab(instance.groups[3].transform, out var slotPrefab))
         {
-            LogLayoutError("The four-slot UI template has an unexpected hierarchy.");
             return;
-        }
-        for (int i = 0; i < 4; i++)
-        {
-            if (template.transform.GetChild(i).GetComponent<UI_InGame_GemSlot>() == null)
-            {
-                LogLayoutError("A slot component is missing from the UI template.");
-                return;
-            }
         }
 
         int oldLength = instance.groups.Length;
@@ -95,21 +106,29 @@ public static class UI_InGame_SkillButton_GemGroup_Patch
         {
             for (int i = oldLength; i < groups.Length; i++)
             {
-                var clone = UnityEngine.Object.Instantiate(template, instance.transform, false);
+                var clone = UnityEngine.Object.Instantiate(instance.groups[3], instance.transform, false);
                 groups[i] = clone;
                 // Vanilla fills activeGemSlots only when activating an inactive group.
                 clone.SetActive(false);
                 clone.name = $"DewGemSlotCount_{i + 1}";
                 var group = clone.transform;
-                while (group.childCount < i + 1)
+                var slots = CollectSlotChildren(group);
+                while (slots.Count < i + 1)
                 {
-                    UnityEngine.Object.Instantiate(template.transform.GetChild(0).gameObject, group, false);
+                    var obj = UnityEngine.Object.Instantiate(slotPrefab, group, false);
+                    var created = obj.GetComponent<UI_InGame_GemSlot>();
+                    if (created == null)
+                    {
+                        throw new InvalidOperationException(
+                            "Cloned gem slot has no UI_InGame_GemSlot component.");
+                    }
+                    slots.Add(obj.transform);
                 }
-                for (int slot = 0; slot < group.childCount; slot++)
+                for (int slot = 0; slot < slots.Count; slot++)
                 {
-                    group.GetChild(slot).GetComponent<UI_InGame_GemSlot>().slotIndex = slot;
+                    slots[slot].GetComponent<UI_InGame_GemSlot>().slotIndex = slot;
                 }
-                SetupDualLineLayout(group, i + 1);
+                SetupDualLineLayout(slots, i + 1, IsMovementGroup(instance));
             }
         }
         catch (Exception ex)
@@ -134,28 +153,85 @@ public static class UI_InGame_SkillButton_GemGroup_Patch
         Debug.LogWarning("[DewGemSlotCount] Cannot extend gem slot UI: " + message);
     }
 
-    private static void SetupDualLineLayout(Transform group, int totalSlots)
+    private static bool TryGetSlotPrefab(Transform templateGroup, out GameObject slotPrefab)
     {
-        int split = (totalSlots + 1) / 2;
-        float spacing = 50f * (1f - totalSlots * 0.02f);
-        ArrangeLine(group, 0, split, DualLineDownY, spacing);
-        ArrangeLine(group, split, totalSlots - split, DualLineUpY, spacing);
+        slotPrefab = null;
+        if (templateGroup == null)
+        {
+            LogLayoutError("The four-slot UI template is missing.");
+            return false;
+        }
+
+        var slots = CollectSlotChildren(templateGroup);
+        if (slots.Count != 4)
+        {
+            LogLayoutError(
+                $"The four-slot UI template has an unexpected hierarchy (found {slots.Count} gem slots, expected 4).");
+            return false;
+        }
+
+        // Copy the last slot-bearing child: it is guaranteed to share the vanilla
+        // structure even if non-slot children were added around the slots.
+        slotPrefab = slots[slots.Count - 1].gameObject;
+        return true;
     }
 
-    private static void ArrangeLine(Transform group, int startIndex, int slotCount, float yPos, float spacing)
+    private static List<Transform> CollectSlotChildren(Transform group)
+    {
+        var slots = new List<Transform>();
+        if (group == null) return slots;
+        for (int c = 0; c < group.childCount; c++)
+        {
+            var child = group.GetChild(c);
+            if (child.GetComponent<UI_InGame_GemSlot>() != null)
+            {
+                slots.Add(child);
+            }
+        }
+        return slots;
+    }
+
+    private static bool IsMovementGroup(UI_InGame_SkillButton_GemGroup instance)
+    {
+        try
+        {
+            if (ButtonField == null || SkillTypeField == null || instance == null) return false;
+            var button = ButtonField.GetValue(instance) as UI_InGame_SkillButton;
+            if (button == null) return false;
+            return (HeroSkillLocation)SkillTypeField.GetValue(button) == HeroSkillLocation.Movement;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void SetupDualLineLayout(List<Transform> slots, int totalSlots, bool compact = false)
+    {
+        int split = (totalSlots + 1) / 2;
+        float spacing = compact
+            ? 38f * (1f - totalSlots * 0.02f)
+            : 50f * (1f - totalSlots * 0.02f);
+        float upY = compact ? CompactLineUpY : DualLineUpY;
+        float downY = compact ? CompactLineDownY : DualLineDownY;
+        ArrangeLine(slots, 0, split, downY, spacing);
+        ArrangeLine(slots, split, totalSlots - split, upY, spacing);
+    }
+
+    private static void ArrangeLine(List<Transform> slots, int startIndex, int slotCount, float yPos, float spacing)
     {
         float startX = -(slotCount - 1) * spacing / 2f;
         for (int i = 0; i < slotCount; i++)
         {
-            group.GetChild(startIndex + i).localPosition = new Vector3(startX + i * spacing, yPos, 0f);
+            slots[startIndex + i].localPosition = new Vector3(startX + i * spacing, yPos, 0f);
         }
     }
 
-    private static void SmoothMoveY(GameObject group, int startIndex, int endIndex, float value, float duration)
+    private static void SmoothMoveSlots(List<Transform> slots, int startIndex, int endIndex, float value, float duration)
     {
-        for (int i = startIndex; i < endIndex; i++)
+        for (int i = startIndex; i < endIndex && i < slots.Count; i++)
         {
-            var child = group.transform.GetChild(i);
+            var child = slots[i];
             child.DOKill(complete: true);
             child.DOLocalMoveY(value, duration).SetUpdate(isIndependentUpdate: true);
         }

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 
@@ -28,18 +29,9 @@ public static class UI_InGame_Scoreboard_PlayerItem_Skill_Patch
         }
 
         var template = gemObjects[2];
-        if (template.transform.childCount != 4)
+        if (!TryGetGemPrefab(template.transform, out var gemPrefab))
         {
-            LogLayoutError("The scoreboard template has an unexpected hierarchy.");
             return;
-        }
-        for (int i = 0; i < 4; i++)
-        {
-            if (template.transform.GetChild(i).GetComponent<UI_InGame_Scoreboard_PlayerItem_Skill_Gem>() == null)
-            {
-                LogLayoutError("A gem component is missing from the scoreboard template.");
-                return;
-            }
         }
 
         int oldLength = gemObjects.Length;
@@ -55,15 +47,23 @@ public static class UI_InGame_Scoreboard_PlayerItem_Skill_Patch
                 clone.SetActive(false);
                 clone.name = $"{quantity} Gems";
                 var group = clone.transform;
-                while (group.childCount < quantity)
+                var gems = CollectGemChildren(group);
+                while (gems.Count < quantity)
                 {
-                    UnityEngine.Object.Instantiate(template.transform.GetChild(0).gameObject, group, false);
+                    var obj = UnityEngine.Object.Instantiate(gemPrefab, group, false);
+                    var created = obj.GetComponent<UI_InGame_Scoreboard_PlayerItem_Skill_Gem>();
+                    if (created == null)
+                    {
+                        throw new InvalidOperationException(
+                            "Cloned scoreboard gem has no UI_InGame_Scoreboard_PlayerItem_Skill_Gem component.");
+                    }
+                    gems.Add(obj.transform);
                 }
-                for (int slot = 0; slot < group.childCount; slot++)
+                for (int slot = 0; slot < gems.Count; slot++)
                 {
-                    group.GetChild(slot).GetComponent<UI_InGame_Scoreboard_PlayerItem_Skill_Gem>().index = slot;
+                    gems[slot].GetComponent<UI_InGame_Scoreboard_PlayerItem_Skill_Gem>().index = slot;
                 }
-                SetupDualLineLayout(group, quantity);
+                SetupDualLineLayout(gems, quantity);
             }
             GemObjectsField.SetValue(__instance, groups);
         }
@@ -84,20 +84,56 @@ public static class UI_InGame_Scoreboard_PlayerItem_Skill_Patch
         Debug.LogWarning("[DewGemSlotCount] Cannot extend scoreboard UI: " + message);
     }
 
-    private static void SetupDualLineLayout(Transform group, int totalSlots)
+    private static bool TryGetGemPrefab(Transform templateGroup, out GameObject gemPrefab)
+    {
+        gemPrefab = null;
+        if (templateGroup == null)
+        {
+            LogLayoutError("The four-slot scoreboard template is missing.");
+            return false;
+        }
+
+        var gems = CollectGemChildren(templateGroup);
+        if (gems.Count != 4)
+        {
+            LogLayoutError(
+                $"The scoreboard template has an unexpected hierarchy (found {gems.Count} gems, expected 4).");
+            return false;
+        }
+
+        gemPrefab = gems[gems.Count - 1].gameObject;
+        return true;
+    }
+
+    private static List<Transform> CollectGemChildren(Transform group)
+    {
+        var gems = new List<Transform>();
+        if (group == null) return gems;
+        for (int c = 0; c < group.childCount; c++)
+        {
+            var child = group.GetChild(c);
+            if (child.GetComponent<UI_InGame_Scoreboard_PlayerItem_Skill_Gem>() != null)
+            {
+                gems.Add(child);
+            }
+        }
+        return gems;
+    }
+
+    private static void SetupDualLineLayout(List<Transform> gems, int totalSlots)
     {
         int num = Mathf.CeilToInt(totalSlots / 2f);
         int slotCount = totalSlots - num;
-        ArrangeLine(group, num, slotCount, 100f, 30f * (1f - totalSlots * 0.02f));
-        ArrangeLine(group, 0, num, -20f, 30f * (1f - totalSlots * 0.02f));
+        ArrangeLine(gems, num, slotCount, 100f, 30f * (1f - totalSlots * 0.02f));
+        ArrangeLine(gems, 0, num, -20f, 30f * (1f - totalSlots * 0.02f));
     }
 
-    private static void ArrangeLine(Transform group, int startIndex, int slotCount, float yPos, float spacing)
+    private static void ArrangeLine(List<Transform> gems, int startIndex, int slotCount, float yPos, float spacing)
     {
         float offset = -((slotCount - 1) * spacing / 2f);
         for (int i = 0; i < slotCount; i++)
         {
-            group.GetChild(startIndex + i).localPosition = new Vector3(offset + i * spacing, yPos, 0f);
+            gems[startIndex + i].localPosition = new Vector3(offset + i * spacing, yPos, 0f);
         }
     }
 }
